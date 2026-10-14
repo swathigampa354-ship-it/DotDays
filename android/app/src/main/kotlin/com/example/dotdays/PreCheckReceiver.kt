@@ -54,18 +54,50 @@ class PreCheckReceiver : BroadcastReceiver() {
             val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val pi = PendingIntent.getBroadcast(context, ALARM_ID, intent, flags)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                am.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    target.timeInMillis,
-                    pi
-                )
-            } else {
-                am.setExact(
-                    AlarmManager.RTC_WAKEUP,
-                    target.timeInMillis,
-                    pi
-                )
+            // On Android 12+ (API 31+) exact alarms need SCHEDULE_EXACT_ALARM /
+            // USE_EXACT_ALARM, and the user can revoke that permission at any
+            // time in Settings. Scheduling an exact alarm without it throws a
+            // SecurityException, which would crash the app. Check first and
+            // fall back to an inexact (but still wake-up) alarm so the nightly
+            // wallpaper pre-check keeps running on every supported Android
+            // version.
+            val canScheduleExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                am.canScheduleExactAlarms()
+
+            try {
+                if (canScheduleExact) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        am.setExactAndAllowWhileIdle(
+                            AlarmManager.RTC_WAKEUP,
+                            target.timeInMillis,
+                            pi
+                        )
+                    } else {
+                        am.setExact(
+                            AlarmManager.RTC_WAKEUP,
+                            target.timeInMillis,
+                            pi
+                        )
+                    }
+                } else {
+                    Log.w(TAG, "Exact alarms not permitted, scheduling inexact pre-check")
+                    am.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        target.timeInMillis,
+                        pi
+                    )
+                }
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Exact alarm rejected (${e.message}), scheduling inexact pre-check")
+                try {
+                    am.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        target.timeInMillis,
+                        pi
+                    )
+                } catch (e2: Exception) {
+                    Log.e(TAG, "Failed to schedule pre-check: ${e2.message}")
+                }
             }
 
             Log.d(TAG, "Pre-check alarm scheduled for ${target.time}")
@@ -102,7 +134,13 @@ class PreCheckReceiver : BroadcastReceiver() {
             Log.e(TAG, "Error in pre-check: ${e.message}")
         }
 
-        // Re-schedule for tomorrow night
-        scheduleNext(context)
+        // Re-schedule for tomorrow night. Never let a scheduling failure
+        // escape here: an uncaught exception in a BroadcastReceiver crashes
+        // the whole app on Android 10+.
+        try {
+            scheduleNext(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to re-schedule pre-check: ${e.message}")
+        }
     }
 }

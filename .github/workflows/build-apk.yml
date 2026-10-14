@@ -29,11 +29,16 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          # Pinned so release builds are reproducible. Bump deliberately.
+          flutter-version: '3.47.7'
           channel: 'stable'
           cache: true
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
 
       - name: Build split APKs
         run: flutter build apk --split-per-abi --release
@@ -42,6 +47,15 @@ jobs:
         run: |
           cd build/app/outputs/flutter-apk
           cp app-arm64-v8a-release.apk DotDays.apk
+
+      - name: Verify APK compatibility (min/target SDK + ABIs)
+        run: |
+          AAPT2="$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | tail -1)"
+          echo "Using aapt2: $AAPT2"
+          for apk in build/app/outputs/flutter-apk/*.apk; do
+            echo "=== $(basename "$apk") ==="
+            "$AAPT2" dump badging "$apk" | grep -E "^package:|^sdkVersion:|^targetSdkVersion:|^native-code:"
+          done
 
       - name: Upload APKs as Artifact
         uses: actions/upload-artifact@v4
@@ -58,9 +72,10 @@ jobs:
         run: |
           VERSION=$(grep 'version:' pubspec.yaml | head -1 | awk '{print $2}' | cut -d'+' -f1)
           echo "app_version=$VERSION" >> $GITHUB_OUTPUT
-          echo "date=$(date +'%Y.%m.%d')" >> $GITHUB_OUTPUT
-          echo "time=$(date +'%H%M')" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +'%Y.%m.%d')" >> $GITHUB_OUTPUT
+          echo "time=$(date -u +'%H%M')" >> $GITHUB_OUTPUT
           echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "run_number=${{ github.run_number }}" >> $GITHUB_OUTPUT
 
       - name: List built APKs
         run: |
@@ -70,7 +85,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ steps.version.outputs.app_version }}-${{ steps.version.outputs.date }}
+          tag_name: v${{ steps.version.outputs.app_version }}-${{ steps.version.outputs.date }}-r${{ steps.version.outputs.run_number }}
           name: DotDays v${{ steps.version.outputs.app_version }}
           body: |
             ## 📱 DotDays — Life in Dots
@@ -100,13 +115,37 @@ jobs:
             3. Tap Install
             4. Done! 🚀
 
+            > ⚠️ These APKs are signed with a throw-away debug key, so a new
+            > release can **not** be installed on top of an older one.
+            > Uninstall DotDays first, then install the new APK.
+            > (Your saved settings are reset by uninstalling.)
+
+            ---
+
+            ### 🤝 Android 10+ Compatibility
+
+            - Supports **Android 10 (API 29) and above**; the app itself still
+              installs on Android 7.0+ (minSdk 24) and targets API 36.
+            - Ships **both 32-bit (`armeabi-v7a`) and 64-bit (`arm64-v8a`)**
+              builds.
+            - Nightly wallpaper alarms now check `canScheduleExactAlarms()`
+              before scheduling (Android 12+ permission) and fall back to an
+              inexact alarm, so a revoked/withheld exact-alarm permission can no
+              longer crash the app.
+            - The Dart-side daily scheduler has the same inexact-alarm fallback,
+              so a scheduling failure can no longer abort app start-up.
+            - No app features, screens or behaviour were changed.
+
+            See the repository README for full details and build instructions.
+
             ---
 
             **Build Info:**
             - 📅 Date: ${{ steps.version.outputs.date }} at ${{ steps.version.outputs.time }} UTC
             - 🔗 Commit: ${{ steps.version.outputs.sha_short }}
             - 📦 Version: ${{ steps.version.outputs.app_version }}
-            - 🏗️ Built by: GitHub Actions
+            - 🛠️ Flutter: 3.47.7 (pinned) · Gradle 8.14 · AGP 8.11.1 · Kotlin 2.2.20
+            - 🏗️ Built by: GitHub Actions (run ${{ steps.version.outputs.run_number }})
 
             *Auto-generated release*
           files: |

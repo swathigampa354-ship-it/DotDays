@@ -129,16 +129,42 @@ class BackgroundService {
     // Calculate the next midnight (plus 5 seconds to ensure the day has fully rolled over)
     DateTime nextMidnight = DateTime(now.year, now.month, now.day + 1, 0, 0, 5);
     
-    // Use oneShotAt for exact timing and wakeup
-    await AndroidAlarmManager.oneShotAt(
-      nextMidnight,
-      alarmId,
-      alarmCallbackDispatcher,
-      exact: true,
-      wakeup: true,
-      rescheduleOnReboot: true,
-    );
-    debugPrint('BackgroundService: exact alarm scheduled for $nextMidnight');
+    // Use oneShotAt for exact timing and wakeup.
+    // On Android 12+ exact alarms need a permission the user can revoke from
+    // Settings; if the exact alarm is rejected we fall back to an inexact
+    // (still wake-up) alarm so the daily update keeps running instead of
+    // failing. scheduleDaily() is awaited from main(), so it must never throw.
+    try {
+      await AndroidAlarmManager.oneShotAt(
+        nextMidnight,
+        alarmId,
+        alarmCallbackDispatcher,
+        exact: true,
+        wakeup: true,
+        rescheduleOnReboot: true,
+      );
+      debugPrint('BackgroundService: exact alarm scheduled for $nextMidnight');
+    } catch (e) {
+      debugPrint('BackgroundService: exact alarm failed ($e), using inexact alarm');
+      await _scheduleInexact(nextMidnight);
+    }
+  }
+
+  /// Schedule a non-exact wake-up alarm for [time] (fallback path).
+  static Future<void> _scheduleInexact(DateTime time) async {
+    try {
+      await AndroidAlarmManager.oneShotAt(
+        time,
+        alarmId,
+        alarmCallbackDispatcher,
+        exact: false,
+        wakeup: true,
+        rescheduleOnReboot: true,
+      );
+      debugPrint('BackgroundService: inexact alarm scheduled for $time');
+    } catch (e) {
+      debugPrint('BackgroundService: could not schedule alarm: $e');
+    }
   }
 
   /// Re-schedule the task — useful on app launch to ensure it's still alive.
