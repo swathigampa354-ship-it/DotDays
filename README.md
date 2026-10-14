@@ -47,7 +47,7 @@
 - Consistent rendering between preview and actual wallpaper
 
 ### ⚙️ Auto-Update Engine
-- Background wallpaper updates via **WorkManager** (every 15 minutes, checks for day change)
+- Background wallpaper updates via an **exact alarm** at midnight (`android_alarm_manager_plus`)
 - Survives **phone reboots** with a native `BootReceiver`
 - Requests **battery optimization exemption** for reliable background execution
 - Works on aggressive OEMs (Xiaomi, Realme, Samsung, OPPO)
@@ -73,7 +73,7 @@ lib/
 │   ├── wallpaper/     # Wallpaper preview & application
 │   └── settings/      # App settings screen
 ├── services/
-│   ├── background_service.dart          # WorkManager scheduling
+│   ├── background_service.dart          # Midnight exact-alarm scheduling
 │   ├── headless_wallpaper_renderer.dart # Canvas-based wallpaper generation
 │   ├── wallpaper_service.dart           # System wallpaper application
 │   ├── wallpaper_auto_updater.dart      # App-launch fallback updater
@@ -93,7 +93,7 @@ lib/
 | **Framework** | Flutter 3.5+ |
 | **State Management** | Riverpod |
 | **Navigation** | GoRouter |
-| **Background Tasks** | WorkManager |
+| **Background Tasks** | android_alarm_manager_plus |
 | **Storage** | SharedPreferences |
 | **Wallpaper** | wallpaper_manager_flutter |
 | **Rendering** | dart:ui Canvas API (headless) |
@@ -103,9 +103,12 @@ lib/
 ## 🚀 Getting Started
 
 ### Prerequisites
-- Flutter SDK `^3.5.0`
-- Android SDK
-- An Android device or emulator
+- Flutter SDK `3.47.7` (pinned in CI — `.github/workflows/build-apk.yml`)
+  and Dart `^3.5.0`
+- JDK 17 or newer
+- Android SDK (platform 36, build-tools 36)
+- An Android device or emulator running Android 7.0+ (Android 10 / API 29+ is
+  the tested target)
 
 ### Installation
 
@@ -150,11 +153,92 @@ DotDays uses multiple strategies to ensure the wallpaper updates reliably:
 
 | Strategy | Purpose |
 |----------|---------|
-| **WorkManager** | Android-recommended background task scheduler |
+| **Background Task** | Exact midnight alarm via `android_alarm_manager_plus` |
+| **Native Pre-Check** | `AlarmManager` at 23:50 refreshes wallpaper IDs |
 | **BootReceiver** | Re-registers task after phone reboot |
 | **Battery Optimization Exemption** | Prevents OS from killing the background task |
 | **App-Launch Fallback** | Checks and updates wallpaper when app is opened |
 | **Day-Change Guard** | Only regenerates wallpaper once per day |
+
+---
+
+## 🤝 Android 10+ Compatibility
+
+DotDays targets modern Android without dropping older devices or 32-bit
+hardware.
+
+| Property | Value |
+|----------|-------|
+| **minSdk** | 24 (Android 7.0) — installs on Android 10 (API 29) and everything newer |
+| **targetSdk** | 36 (Android 16) |
+| **compileSdk** | 36 |
+| **CPU ABIs** | `arm64-v8a` (64-bit ARM), `armeabi-v7a` (32-bit ARM), `x86_64` |
+| **Build toolchain** | Flutter 3.47.7 · Gradle 8.14 · AGP 8.11.1 · Kotlin 2.2.20 · JDK 17 |
+
+### What the compatibility pass changed
+
+These were the only source changes — behaviour, screens and features are
+untouched.
+
+1. **`PreCheckReceiver.kt` — exact-alarm crash on Android 12+ (fixed).**
+   `scheduleNext()` called `AlarmManager.setExactAndAllowWhileIdle()`
+   unguarded. On Android 12+ (API 31) exact alarms require
+   `SCHEDULE_EXACT_ALARM` / `USE_EXACT_ALARM`, and the user can revoke that
+   permission at any time from *Settings → Alarms & reminders*. Scheduling
+   without it throws `SecurityException`; in `onReceive()` the trailing
+   `scheduleNext()` call was outside the `try` block, so a revocation crashed
+   the app during the nightly wallpaper pre-check. It now checks
+   `canScheduleExactAlarms()` first, falls back to an inexact
+   allow-while-idle alarm, and never lets a scheduling error escape the
+   receiver.
+2. **`background_service.dart` — start-up crash on scheduling failure (fixed).**
+   `scheduleDaily()` is `await`ed from `main()` with no error handling, so any
+   alarm-scheduling failure would abort start-up before `runApp()`. It now
+   retries with an inexact alarm and is guaranteed not to throw.
+3. **`.github/workflows/build-apk.yml` — reproducible, verifiable builds.**
+   Flutter is pinned to 3.47.7, `flutter test` runs before the build, a new
+   step prints each APK's `minSdk`/`targetSdk`/ABI set as build evidence, and
+   release tags are unique per run (`v<version>-<date>-r<run>`).
+
+Everything else — the 365-dot wallpaper, the three calendar modes
+(Year/Life/Goal), the daily auto-update, boot re-scheduling, battery-optimization
+opt-in, the OEM wallpaper-preserving workaround and all settings — behaves
+exactly as before.
+
+> **Note on "live wallpaper":** DotDays renders a wallpaper image
+> (1080×2340 PNG) and applies it with `WallpaperManager`, then regenerates it
+> once the day changes. It does **not** use an `android.service.wallpaper.WallpaperService`,
+> so there is no live-wallpaper service or `<meta-data>` wallpaper metadata to
+> maintain. That design was preserved rather than replaced.
+
+### Verifying a build yourself
+
+```bash
+# Which SDK levels and ABIs did an APK actually get?
+AAPT2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | tail -1)
+for apk in build/app/outputs/flutter-apk/*.apk; do
+  echo "=== $apk ==="
+  "$AAPT2" dump badging "$apk" | grep -E "^package:|^sdkVersion|^targetSdkVersion:|^native-code:"
+done
+
+# Signature + alignment
+"$ANDROID_HOME"/build-tools/*/apksigner verify --verbose build/app/outputs/flutter-apk/DotDays.apk
+zipalign -c -v 4 build/app/outputs/flutter-apk/DotDays.apk
+```
+
+### Release signing
+
+Release APKs are signed with the **debug key** (`signingConfig` for the release
+build type), which is what the stock Flutter template does so
+`flutter build apk --release` works out of the box. Two consequences worth
+knowing:
+
+- Every CI run generates a fresh runner keystore, so consecutive releases are
+  **not** installable over one another. Uninstall DotDays before installing a
+  newer APK.
+- To make upgrade-in-place installs possible, add your own keystore and a
+  `key.properties` (both are already git-ignored) and point the release build
+  type at it.
 
 ---
 
